@@ -18,7 +18,7 @@ const KEYCLOAK_URL =
  * @return {*} {Promise<true>} true if the token is authenticated
  * @throws {HTTP401} if the token is not authenticated
  */
-export const authenticate = async function (req: Request): Promise<true> {
+export const authenticateRequest = async function (req: Request): Promise<true> {
   try {
     if (!req?.headers?.authorization) {
       defaultLog.warn({ label: 'authenticate', message: 'authorization headers were null or missing' });

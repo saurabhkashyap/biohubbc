@@ -1,7 +1,6 @@
-import { Request, RequestHandler } from 'express';
-import { SYSTEM_ROLE } from '../../constants/roles';
+import { Request } from 'express';
+import { PROJECT_ROLE, SYSTEM_ROLE } from '../../constants/roles';
 import { getDBConnection, IDBConnection } from '../../database/db';
-import { HTTP403 } from '../../errors/CustomError';
 import { ProjectUserObject, UserObject } from '../../models/user';
 import { getLogger } from '../../utils/logger';
 import { getProjectUserObject } from '../user/project-user';
@@ -14,84 +13,74 @@ enum AuthorizeOperator {
   OR = 'or'
 }
 
-interface AuthorizeSystemRoles {
-  validSystemRoles: string[];
+interface AuthorizeBySystemRoles {
+  validSystemRoles: SYSTEM_ROLE[];
   discriminator: 'SystemRole';
 }
 
-interface AuthorizeProjectRoles {
-  validProjectRoles: string[];
+interface AuthorizeByProjectRoles {
+  validProjectRoles: PROJECT_ROLE[];
   projectId: number;
   discriminator: 'ProjectRole';
 }
 
-type AuthorizeConfig = AuthorizeSystemRoles | AuthorizeProjectRoles;
+type AuthorizeRule = AuthorizeBySystemRoles | AuthorizeByProjectRoles;
 
 type AuthorizeConfigOr = {
   [AuthorizeOperator.AND]?: never;
-  [AuthorizeOperator.OR]: AuthorizeConfig[];
+  [AuthorizeOperator.OR]: AuthorizeRule[];
 };
 
 type AuthorizeConfigAnd = {
-  [AuthorizeOperator.AND]: AuthorizeConfig[];
+  [AuthorizeOperator.AND]: AuthorizeRule[];
   [AuthorizeOperator.OR]?: never;
 };
 
 export type AuthorizationScheme = AuthorizeConfigAnd | AuthorizeConfigOr;
 
 /**
- * Authorize the current user against the `AuthorizationScheme` defined in `req['authorization_scheme']`.
+ * Returns `true` if the user is authorized successfully against the `AuthorizationScheme` in
+ * `req['authorization_scheme']`, `false` otherwise.
  *
- * Returns `next()` if the user is authorized. Throws an error if the user is not authorized.
+ * Note: System administrators are automatically granted access, regardless of the authorization scheme provided.
  *
- * @export
- * @return {*}  {RequestHandler}
+ * @param {Request} req
+ * @return {*}  {Promise<boolean>}
  */
-export function authorize(): RequestHandler {
-  return async (req, res, next) => {
-    const connection = getDBConnection(req['keycloak_token']);
+export const authorizeRequest = async (req: Request): Promise<boolean> => {
+  const connection = getDBConnection(req['keycloak_token']);
 
-    try {
-      await connection.open();
+  try {
+    await connection.open();
 
-      let systemUserObject: UserObject = req['system_user'] || (await getSystemUserObject(connection));
+    let systemUserObject: UserObject = req['system_user'] || (await getSystemUserObject(connection));
 
-      req['system_user'] = systemUserObject;
+    req['system_user'] = systemUserObject;
 
-      if (!systemUserObject) {
-        defaultLog.warn({ label: 'authorize', message: 'system user was null' });
-        throw new HTTP403('Access Denied');
-      }
-
-      const authorizationScheme: AuthorizationScheme = req['authorization_scheme'];
-      if (!authorizationScheme) {
-        // No authorization scheme specified, all authenticated users are authorized
-        return next();
-      }
-
-      if (authorizeSystemAdministrator(systemUserObject)) {
-        // User is a system administrator with full access, skip all remaining checks
-        return next();
-      }
-
-      const isAuthorized = await executeAuthorizationScheme(req, systemUserObject, authorizationScheme, connection);
-
-      if (!isAuthorized) {
-        defaultLog.warn({ label: 'authorize', message: 'user has insufficient privileges' });
-        throw new HTTP403('Access Denied');
-      }
-    } catch (error) {
-      defaultLog.error({ label: 'authorize', message: 'error', error });
-      await connection.rollback();
-      throw new HTTP403('Access Denied');
-    } finally {
-      connection.release();
+    if (!systemUserObject) {
+      return false;
     }
 
-    // User is authorized
-    return next();
-  };
-}
+    if (authorizeSystemAdministrator(systemUserObject)) {
+      // User is a system administrator with full access, skip all remaining checks
+      return true;
+    }
+
+    const authorizationScheme: AuthorizationScheme = req['authorization_scheme'];
+    if (!authorizationScheme) {
+      // No authorization scheme specified, all authenticated users are authorized
+      return true;
+    }
+
+    return await executeAuthorizationScheme(req, systemUserObject, authorizationScheme, connection);
+  } catch (error) {
+    defaultLog.error({ label: 'authorize', message: 'error', error });
+    await connection.rollback();
+    return false;
+  } finally {
+    connection.release();
+  }
+};
 
 /**
  * Execute the `authorizationScheme` against the current user, and return `true` if they have access, `false` otherwise.
@@ -119,17 +108,17 @@ export const executeAuthorizationScheme = async (
 };
 
 /**
- * Execute an array of `AuthorizeConfig`, returning an array of boolean results.
+ * Execute an array of `AuthorizeRule`, returning an array of boolean results.
  *
  * @param {UserObject} systemUserObject
- * @param {AuthorizeConfig[]} authorizeConfig
+ * @param {AuthorizeRule[]} authorizeConfig
  * @param {IDBConnection} connection
  * @return {*}  {Promise<boolean[]>}
  */
 export const executeAuthorizeConfig = async (
   req: Request,
   systemUserObject: UserObject,
-  authorizeConfig: AuthorizeConfig[],
+  authorizeConfig: AuthorizeRule[],
   connection: IDBConnection
 ): Promise<boolean[]> => {
   const authorizeResults: boolean[] = [];
@@ -162,13 +151,13 @@ export const authorizeSystemAdministrator = (systemUserObject: UserObject): bool
  * Check that the user has at least one of the valid system roles specified in `authorizeSystemRoles.validSystemRoles`.
  *
  * @param {UserObject} systemUserObject
- * @param {AuthorizeSystemRoles} authorizeSystemRoles
+ * @param {AuthorizeBySystemRoles} authorizeSystemRoles
  * @return {*}  {boolean} `true` if the user has at least one valid system role role, or no valid system roles are
  * specified; `false` otherwise.
  */
 export const authorizeBySystemRole = (
   systemUserObject: UserObject,
-  authorizeSystemRoles: AuthorizeSystemRoles
+  authorizeSystemRoles: AuthorizeBySystemRoles
 ): boolean => {
   if (!systemUserObject) {
     // Cannot verify user roles
@@ -188,14 +177,14 @@ export const authorizeBySystemRole = (
  * Check that the user has at least on of the valid project roles specified in `authorizeProjectRoles.validProjectRoles`.
  *
  * @param {UserObject} systemUserObject
- * @param {AuthorizeProjectRoles} authorizeProjectRoles
+ * @param {AuthorizeByProjectRoles} authorizeProjectRoles
  * @param {IDBConnection} connection
  * @return {*}  {Promise<boolean>} `Promise<true>` if the user has at least one valid project role, or no valid project
  * roles are specified; `Promise<false>` otherwise.
  */
 export const authorizeByProjectRole = async (
   req: Request,
-  authorizeProjectRoles: AuthorizeProjectRoles,
+  authorizeProjectRoles: AuthorizeByProjectRoles,
   connection: IDBConnection
 ): Promise<boolean> => {
   if (!authorizeProjectRoles.projectId) {

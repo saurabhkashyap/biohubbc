@@ -5,7 +5,7 @@ import { OpenAPIV3 } from 'openapi-types';
 import { defaultPoolConfig, initDBPool } from './database/db';
 import { ensureCustomError } from './errors/CustomError';
 import { rootAPIDoc } from './openapi/root-api-doc';
-import { authenticate } from './request-handlers/security/authentication';
+import { authenticateRequest } from './request-handlers/security/authentication';
 import { getLogger } from './utils/logger';
 
 const defaultLog = getLogger('app');
@@ -55,7 +55,7 @@ initialize({
   securityHandlers: {
     // authenticates the request bearer token, for endpoints that specify `Bearer` security
     Bearer: async function (req: any) {
-      return await authenticate(req);
+      return await authenticateRequest(req);
     }
   },
   errorTransformer: function (openapiError: object, ajvError: object): object {
